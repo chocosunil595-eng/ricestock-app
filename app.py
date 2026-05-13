@@ -1,6 +1,6 @@
 """
-RiceStock - Quintal System
-A professional Rice Inventory Management Web App built with Streamlit.
+RiceStock - Created by Sunil
+PDS GOVT. Rice Inventory Management
 Single-file, production-ready implementation.
 """
 
