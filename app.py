@@ -234,10 +234,17 @@ def init_db():
             closing_kg  REAL DEFAULT 0,
             selling_kg  REAL DEFAULT 0,
             remarks     TEXT DEFAULT '',
+            pickup_day  INTEGER DEFAULT NULL,
             created_at  TEXT,
             UNIQUE(entry_date, card_type)
         )
     """)
+    # Migrate existing DB safely (adds column if not already present)
+    try:
+        cur.execute("ALTER TABLE inventory ADD COLUMN pickup_day INTEGER DEFAULT NULL")
+        conn.commit()
+    except Exception:
+        pass  # Column already exists — safe to ignore
 
     # Settings / credentials table
     cur.execute("""
@@ -367,7 +374,8 @@ def get_previous_closing(entry_date: date, card_type: str) -> float:
 
 def upsert_entry(entry_date: date, card_type: str,
                  opening_kg: float, received_kg: float,
-                 closing_kg: float, remarks: str = "") -> dict:
+                 closing_kg: float, remarks: str = "",
+                 pickup_day: int = None) -> dict:
     """
     Insert or update a daily entry, applying smart auto-adjustment.
     Returns a dict with final values and an optional adjustment message.
@@ -392,8 +400,8 @@ def upsert_entry(entry_date: date, card_type: str,
     conn.execute("""
         INSERT INTO inventory
             (entry_date, card_type, opening_kg, received_kg,
-             total_kg, closing_kg, selling_kg, remarks, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             total_kg, closing_kg, selling_kg, remarks, pickup_day, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(entry_date, card_type) DO UPDATE SET
             opening_kg  = excluded.opening_kg,
             received_kg = excluded.received_kg,
@@ -401,12 +409,13 @@ def upsert_entry(entry_date: date, card_type: str,
             closing_kg  = excluded.closing_kg,
             selling_kg  = excluded.selling_kg,
             remarks     = excluded.remarks,
+            pickup_day  = excluded.pickup_day,
             created_at  = excluded.created_at
     """, (
         str(entry_date), card_type,
         round(opening_kg, 2), round(received_kg, 2),
         round(total_kg, 2), round(closing_kg, 2),
-        round(selling_kg, 2), remarks,
+        round(selling_kg, 2), remarks, pickup_day,
         now_ist().strftime("%Y-%m-%d %H:%M:%S")
     ))
     conn.commit()
@@ -981,33 +990,57 @@ with st.form("bulk_form"):
         month2 = st.selectbox("Month 2", ["January","February","March","April","May","June","July","August","September","October","November","December"], key="m2")
         year2 = st.number_input("Year 2", value=2025, step=1, key="y2")
         
-    # New fields - Day Pickup (Reference for Selling)
-    st.markdown("**Day Pickup Reference (for Selling Record)**")
-    col3, col4 = st.columns(2)
-    with col3:
-        pickup_date1 = st.date_input("Pickup Date - Month 1", value=datetime.date.today(), key="pickup1")
-    with col4:
-        pickup_date2 = st.date_input("Pickup Date - Month 2", value=datetime.date.today(), key="pickup2")
-    
-    received1 = st.number_input("Received Month 1 (Kg)", min_value=0.0, step=0.1, key="rec1")
-    closing1 = st.number_input("Closing Month 1 (Kg)", min_value=0.0, step=0.1, key="clo1")
-    
-    received2 = st.number_input("Received Month 2 (Kg)", min_value=0.0, step=0.1, key="rec2")
-    closing2 = st.number_input("Closing Month 2 (Kg)", min_value=0.0, step=0.1, key="clo2")
-    
-    remarks = st.text_input("Remarks (Optional)", key="bulk_remarks")
-    
-    submitted = st.form_submit_button("Save Bulk 2-Month Entry")
-    
-    if submitted:
-        # Auto logic for Month 1
-        # ... (your existing logic for saving Month 1 with pickup_date1)
-        
-        # Auto logic for Month 2
-        # ... (your existing logic for saving Month 2 with pickup_date2)
-        
-        st.success(f"✅ Bulk entry saved successfully!\n"
-                   f"Month 1 Pickup: {pickup_date1} | Month 2 Pickup: {pickup_date2}")
+    # ── Pickup Day inputs ──
+        st.markdown("<div style='height:6px'></div>", unsafe_allow_html=True)
+        section_header("📅 Distribution / Pickup Day Reference")
+        st.markdown("""
+            <div class="info-box">
+                📌 Enter the day of the month on which ration was distributed
+                (e.g. <strong>15</strong> means the 15th of that month).
+                This is stored as a sell reference for records.
+            </div>
+        """, unsafe_allow_html=True)
+
+        pd1_col, pd2_col = st.columns(2)
+        with pd1_col:
+            pickup_day1 = st.number_input(
+                f"🗓️ Pickup Day – {m1} {y1}",
+                min_value=1, max_value=31,
+                value=1, step=1, key="pd1",
+                help=f"Day of distribution in {m1} {y1}"
+            )
+            # Show the resolved full date as a reference label
+            try:
+                ref_date1 = date(int(y1), m1_num, int(pickup_day1))
+                st.caption(f"📌 Distribution date: **{ref_date1.strftime('%d %b %Y')}**")
+            except ValueError:
+                st.caption("⚠️ Invalid day for this month")
+
+        with pd2_col:
+            pickup_day2 = st.number_input(
+                f"🗓️ Pickup Day – {m2} {y2}",
+                min_value=1, max_value=31,
+                value=1, step=1, key="pd2",
+                help=f"Day of distribution in {m2} {y2}"
+            )
+            try:
+                ref_date2 = date(int(y2), m2_num, int(pickup_day2))
+                st.caption(f"📌 Distribution date: **{ref_date2.strftime('%d %b %Y')}**")
+            except ValueError:
+                st.caption("⚠️ Invalid day for this month")
+
+        if st.button("💾 Save Both Months", use_container_width=True):
+            res1 = upsert_entry(
+                date1, b_card, opening1, recv1, clos1,
+                remarks=f"Bulk entry – {m1} {y1} | Pickup: {int(pickup_day1)}",
+                pickup_day=int(pickup_day1)
+            )
+            res2 = upsert_entry(
+                date2, b_card,
+                res1["closing_kg"], recv2, clos2,
+                remarks=f"Bulk entry – {m2} {y2} | Pickup: {int(pickup_day2)}",
+                pickup_day=int(pickup_day2)
+            )
 # ─────────────────────────────────────────────────────────────────────────────
 # PAGE: REPORTS
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1185,21 +1218,21 @@ def page_reports():
                 </div>
             """, unsafe_allow_html=True)
         else:
-            display_df = df.copy()
-            for col in ["opening_kg", "received_kg", "total_kg",
-                        "closing_kg", "selling_kg"]:
-                display_df[col] = display_df[col].apply(format_qty)
+           display_df["pickup_day"] = display_df["pickup_day"].apply(
+                lambda x: f"Day {int(x)}" if pd.notna(x) and x else "—"
+            )
             display_df = display_df.rename(columns={
-                "entry_date": "Date",
-                "card_type":  "Card",
-                "opening_kg": "Opening",
+                "entry_date":  "Date",
+                "card_type":   "Card",
+                "opening_kg":  "Opening",
                 "received_kg": "Received",
-                "total_kg":   "Total",
-                "closing_kg": "Closing",
-                "selling_kg": "Sold/Issued",
-                "remarks":    "Remarks",
+                "total_kg":    "Total",
+                "closing_kg":  "Closing",
+                "selling_kg":  "Sold/Issued",
+                "pickup_day":  "Pickup Day",
+                "remarks":     "Remarks",
             })[["Date", "Card", "Opening", "Received",
-                "Total", "Closing", "Sold/Issued", "Remarks"]]
+                "Total", "Closing", "Sold/Issued", "Pickup Day", "Remarks"]]
             st.dataframe(display_df, use_container_width=True, hide_index=True)
 
             # Totals summary
